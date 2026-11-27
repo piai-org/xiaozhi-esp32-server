@@ -1,0 +1,11 @@
+# Same dependency image digest as the audited deployment; all application code comes from this checkout.
+ARG VOICE_DEPENDENCIES=ghcr.nju.edu.cn/xinnan-tech/xiaozhi-esp32-server@sha256:ae9eb9ab6f621e54a82f39f1ab81aa24425ed490bb405e9154cee396dc3c9fbe
+FROM ${VOICE_DEPENDENCIES}
+WORKDIR /opt/xiaozhi-esp32-server
+COPY main/xiaozhi-server/requirements.txt /tmp/requirements.txt
+RUN python -m pip install --no-cache-dir -r /tmp/requirements.txt
+COPY main/xiaozhi-server/ ./
+# Never inherit runtime configuration or personal memory from an image layer.
+RUN rm -rf data tmp && mkdir -p data tmp
+ENV PYTHONDONTWRITEBYTECODE=1 TZ=Asia/Shanghai
+CMD ["python", "app.py"]

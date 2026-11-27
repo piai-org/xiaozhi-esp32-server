@@ -1,3 +1,4 @@
+from config.log_safety import safe_diagnostic
 import os
 import asyncio
 from config.config_loader import read_config, get_project_dir, load_config
@@ -23,7 +24,7 @@ def check_config_file():
     # 检查是否从API读取配置
     config = asyncio.run(load_config())
     if config.get("read_config_from_api", False):
-        print("从API读取配置")
+        safe_diagnostic()
         old_config_origin = read_config(custom_config_file)
         if old_config_origin.get("selected_module") is not None:
             error_msg = "您的配置文件好像既包含智控台的配置又包含本地配置：\n"

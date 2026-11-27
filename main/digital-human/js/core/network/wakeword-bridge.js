@@ -1,4 +1,4 @@
-import { uiController } from '../../ui/controller.js?v=0205';
+import { uiController } from '../../ui/controller.js?v=20261020-delivery';
 import { log } from '../../utils/logger.js?v=0205';
 
 let wakewordSocket = null;

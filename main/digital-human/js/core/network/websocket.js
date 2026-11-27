@@ -1,11 +1,11 @@
 // WebSocket消息处理模块
 import { getConfig, saveConnectionUrls } from '../../config/manager.js?v=0205';
-import { uiController } from '../../ui/controller.js?v=0205';
+import { uiController } from '../../ui/controller.js?v=20261020-delivery';
 import { log } from '../../utils/logger.js?v=0205';
-import { getAudioPlayer } from '../audio/player.js?v=0205';
-import { getAudioRecorder } from '../audio/recorder.js?v=0205';
+import { getAudioPlayer } from '../audio/player.js?v=20261020-delivery';
+import { getAudioRecorder } from '../audio/recorder.js?v=20261020-delivery';
 import { executeMcpTool, getMcpTools, setWebSocket as setMcpWebSocket } from '../mcp/tools.js?v=0205';
-import { webSocketConnect } from './ota-connector.js?v=0205';
+import { webSocketConnect } from './ota-connector.js?v=20261014';
 
 // WebSocket处理器类
 export class WebSocketHandler {
@@ -17,6 +17,9 @@ export class WebSocketHandler {
         this.onSessionEmotionChange = null;
         this.onChatMessage = null; // 新增：聊天消息回调
         this.currentSessionId = null;
+        this.playbackEpoch = 0;
+        this.playbackTurn = null;
+        this.playbackDraining = false;
         this.isRemoteSpeaking = false;
     }
 
@@ -79,6 +82,7 @@ export class WebSocketHandler {
             session_id: sessionId,
             type: 'listen',
             state: 'detect',
+            source: 'automatic_wakeup',
             text: '嘿，你好呀'
         }));
         log('发送listen detect消息，唤醒词: 嘿，你好呀', 'info');
@@ -172,6 +176,9 @@ export class WebSocketHandler {
     // 处理TTS消息
     handleTTSMessage(message) {
         if (message.state === 'start') {
+            this.playbackEpoch++;
+            this.playbackTurn = null;
+            this.playbackDraining = false;
             log('服务器开始发送语音', 'info');
             this.currentSessionId = message.session_id;
             this.isRemoteSpeaking = true;
@@ -182,6 +189,10 @@ export class WebSocketHandler {
             // 启动Live2D说话动画
             this.startLive2DTalking();
         } else if (message.state === 'sentence_start') {
+            if (message.turn_id && message.turn_id !== this.playbackTurn) {
+                this.playbackTurn = message.turn_id;
+                this.playbackEpoch++;
+            }
             log(`服务器发送语音段: ${message.text}`, 'info');
             this.ttsSentenceCount = (this.ttsSentenceCount || 0) + 1;
 
@@ -199,26 +210,32 @@ export class WebSocketHandler {
 
             // 句子结束时不清除动画，等待下一个句子或最终停止
         } else if (message.state === 'stop') {
-            log('服务器语音传输结束，清空所有音频缓冲', 'info');
-
-            // 清空所有音频缓冲并停止播放
+            if (message.turn_id && this.playbackTurn && message.turn_id !== this.playbackTurn) return;
             const audioPlayer = getAudioPlayer();
-            audioPlayer.clearAllAudio();
-
-            this.isRemoteSpeaking = false;
-            if (this.onRecordButtonStateChange) {
-                this.onRecordButtonStateChange(false);
+            const epoch = this.playbackEpoch;
+            if (message.reason === 'interrupted') {
+                audioPlayer.clearAllAudio();
+                this.finishSpeaking(epoch);
+            } else {
+                this.playbackDraining = true;
+                log('服务器音频发送完毕，等待剩余语音播放完成', 'info');
+                audioPlayer.finishAudio().then(completed => {
+                    if (completed) this.finishSpeaking(epoch);
+                }).catch(error => log(`等待播放结束失败: ${error.message}`, 'error'));
             }
-            if (this.onSessionStateChange) {
-                this.onSessionStateChange(false);
-            }
-
-            // 延迟停止Live2D说话动画，确保所有句子都播放完毕
-            setTimeout(() => {
-                this.stopLive2DTalking();
-                this.ttsSentenceCount = 0; // 重置计数器
-            }, 1000); // 1秒延迟，确保所有句子都完成
         }
+    }
+
+    finishSpeaking(epoch) {
+        // An old completion must not turn off a newer turn's UI/animation.
+        if (epoch !== this.playbackEpoch) return;
+        this.playbackEpoch++;
+        this.playbackDraining = false;
+        this.isRemoteSpeaking = false;
+        if (this.onRecordButtonStateChange) this.onRecordButtonStateChange(false);
+        if (this.onSessionStateChange) this.onSessionStateChange(false);
+        this.stopLive2DTalking();
+        this.ttsSentenceCount = 0;
     }
 
     // 启动Live2D说话动画
@@ -432,8 +449,10 @@ export class WebSocketHandler {
     // 设置事件处理器
     setupEventHandlers() {
         this.websocket.onopen = async () => {
-            const url = document.getElementById('serverUrl').value;
-            log(`已连接到服务器: ${url}`, 'success');
+            getAudioPlayer().clearAllAudio();
+            this.finishSpeaking(this.playbackEpoch);
+            const url = new URL(this.websocket.url);
+            log(`已连接到服务器: ${url.origin}${url.pathname}`, 'success');
 
             if (this.onConnectionStateChange) {
                 this.onConnectionStateChange(true);
@@ -452,6 +471,11 @@ export class WebSocketHandler {
         };
 
         this.websocket.onclose = () => {
+            // A normal stop followed by server close still owes the buffered goodbye.
+            if (!this.playbackDraining) {
+                getAudioPlayer().clearAllAudio();
+                this.finishSpeaking(this.playbackEpoch);
+            }
             log('已断开连接', 'info');
 
             if (this.onConnectionStateChange) {
@@ -473,9 +497,11 @@ export class WebSocketHandler {
             }
         };
 
-        this.websocket.onerror = (error) => {
-            log(`WebSocket错误: ${error.message || '未知错误'}`, 'error');
-            uiController.addChatMessage(`⚠️ WebSocket错误: ${error.message || '未知错误'}`, false);
+        this.websocket.onerror = () => {
+            const url = new URL(this.websocket.url);
+            const message = `WebSocket连接失败：${url.origin}${url.pathname}。请检查对应语音端口是否已转发到电脑。`;
+            log(message, 'error');
+            uiController.addChatMessage(`⚠️ ${message}`, false);
             if (this.onConnectionStateChange) {
                 this.onConnectionStateChange(false);
             }
@@ -499,6 +525,8 @@ export class WebSocketHandler {
 
     // 断开连接
     disconnect() {
+        getAudioPlayer().clearAllAudio();
+        this.finishSpeaking(this.playbackEpoch);
         if (!this.websocket) return;
 
         this.websocket.close();
@@ -531,6 +559,8 @@ export class WebSocketHandler {
                     type: 'abort',
                     reason: 'wake_word_detected'
                 };
+                getAudioPlayer().clearAllAudio();
+                this.finishSpeaking(this.playbackEpoch);
                 this.websocket.send(JSON.stringify(abortMessage));
                 log('发送打断消息', 'info');
             }

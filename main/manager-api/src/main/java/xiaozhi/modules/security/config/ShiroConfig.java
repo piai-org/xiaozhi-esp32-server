@@ -19,6 +19,8 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Role;
 
 import jakarta.servlet.Filter;
+import xiaozhi.modules.app.auth.session.AppSessionService;
+import xiaozhi.modules.app.security.AppSessionFilter;
 import xiaozhi.modules.security.oauth2.Oauth2Filter;
 import xiaozhi.modules.security.oauth2.Oauth2Realm;
 import xiaozhi.modules.security.secret.ServerSecretFilter;
@@ -52,7 +54,7 @@ public class ShiroConfig {
 
     @Bean("shiroFilter")
     public static ShiroFilterFactoryBean shirFilter(@Lazy WebSecurityManager securityManager,
-            @Lazy SysParamsService sysParamsService) {
+            @Lazy SysParamsService sysParamsService, @Lazy AppSessionService appSessionService) {
         ShiroFilterConfiguration config = new ShiroFilterConfiguration();
         config.setFilterOncePerRequest(true);
 
@@ -65,6 +67,7 @@ public class ShiroConfig {
         filters.put("oauth2", new Oauth2Filter());
         // 服务密钥过滤
         filters.put("server", new ServerSecretFilter(sysParamsService));
+        filters.put("appSession", new AppSessionFilter(appSessionService));
         shiroFilter.setFilters(filters);
 
         // 添加Shiro的内置过滤器
@@ -98,6 +101,9 @@ public class ShiroConfig {
         filterMap.put("/agent/chat-title/**", "server");
         filterMap.put("/agent/play/**", "anon");
         filterMap.put("/voiceClone/play/**", "anon");
+        // Only POST /app/v1/auth/wechat/login is anonymous inside this filter.
+        // Never install an app identity into the management Shiro Subject.
+        filterMap.put("/app/**", "noSessionCreation,appSession");
         filterMap.put("/**", "oauth2");
         shiroFilter.setFilterChainDefinitionMap(filterMap);
 

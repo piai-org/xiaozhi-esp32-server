@@ -197,3 +197,24 @@ uploadfile
 main/digital-human/wakeword_runtime/models
 main/digital-human/wakeword_runtime/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
 sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2
+
+# Local research, human reviews and deployment secrets are not application source.
+/research/
+/dsh_analyze/
+/20??-??-??_*.md
+/后端协作_产品需求简版.md
+/后端适配需求单*.md
+/小圆评审*
+/20??-??-??_*盲评*
+/deploy/companion/runtime/
+/main/manager-api/.test-reports/
+.env.*
+!.env.example
+!**/.env.example
+
+/.artifacts/
+
+# Dated local listening packages and the original repository audit.
+/20??-??-??_*.html
+/20??-??-??_*.zip
+/仓库结构与部署环境分析.md

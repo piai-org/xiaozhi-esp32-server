@@ -1,3 +1,4 @@
+from config.log_safety import safe_diagnostic
 import jwt
 import time
 import json
@@ -122,5 +123,5 @@ class AuthToken:
         except json.JSONDecodeError:
             return False, None
         except Exception as e:  # 捕获其他可能的错误
-            print(f"Token verification failed: {str(e)}")
+            safe_diagnostic()
             return False, None

@@ -83,6 +83,8 @@ class ASRProviderBase(ABC):
     # 处理语音停止
     async def handle_voice_stop(self, conn: "ConnectionHandler", asr_audio_task: List[bytes]):
         """并行处理ASR和声纹识别"""
+        from core.utils.companion_initiative import current_input_token, input_finished
+        input_token = getattr(self, '_initiative_input_token', None) or current_input_token(conn)
         try:
             total_start_time = time.monotonic()
 
@@ -167,12 +169,15 @@ class ASRProviderBase(ABC):
                 audio_snapshot = asr_audio_task.copy()
                 enqueue_asr_report(conn, enhanced_text, audio_snapshot)
                 # 使用自定义模块进行上报
-                await startToChat(conn, enhanced_text)
+                await input_finished(conn, input_token)
+                await startToChat(conn, enhanced_text, input_token=input_token)
         except Exception as e:
             logger.bind(tag=TAG).error(f"处理语音停止失败: {e}")
             import traceback
 
             logger.bind(tag=TAG).debug(f"异常详情: {traceback.format_exc()}")
+        finally:
+            await input_finished(conn, input_token)
 
     def _build_enhanced_text(self, text: str, speaker_name: Optional[str]) -> str:
         """构建包含说话人信息的文本（仅用于纯文本ASR）"""

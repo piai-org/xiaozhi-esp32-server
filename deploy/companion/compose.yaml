@@ -1,0 +1,78 @@
+# Explicit -p keeps these volumes/networks separate from any existing deployment.
+services:
+  voice:
+    build:
+      context: ../..
+      dockerfile: deploy/companion/Dockerfile.voice
+    image: local/xiaozhi-companion-voice:source
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./runtime/voice/data:/opt/xiaozhi-esp32-server/data
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${VOICE_WS_PORT:-18000}:8000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${VOICE_HTTP_PORT:-18003}:8003"
+  browser:
+    image: nginx:1.28-alpine
+    volumes:
+      - ../../main/digital-human:/usr/share/nginx/html:ro
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${BROWSER_PORT:-18006}:80"
+  db:
+    profiles: [manager]
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: xiaozhi_esp32_server
+    volumes:
+      - manager-db:/var/lib/mysql
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysqladmin ping -uroot --silent']
+      interval: 5s
+      timeout: 5s
+      retries: 60
+  redis:
+    profiles: [manager]
+    image: redis:8.0
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  manager-api:
+    profiles: [manager]
+    build:
+      context: ../..
+      dockerfile: deploy/companion/Dockerfile.manager
+      target: manager-api
+    image: local/xiaozhi-companion-api:source
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      TZ: Asia/Shanghai
+      SPRING_DATASOURCE_DRUID_URL: jdbc:mysql://db:3306/xiaozhi_esp32_server?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&nullCatalogMeansCurrent=true&allowPublicKeyRetrieval=true&useSSL=false
+      SPRING_DATASOURCE_DRUID_USERNAME: root
+      SPRING_DATASOURCE_DRUID_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      MINIAPP_AUTH_ENABLED: ${MINIAPP_AUTH_ENABLED:-false}
+      MINIAPP_WECHAT_APP_ID: ${MINIAPP_WECHAT_APP_ID:-}
+      MINIAPP_WECHAT_SECRET: ${MINIAPP_WECHAT_SECRET:-}
+      MINIAPP_SESSION_TTL_SECONDS: ${MINIAPP_SESSION_TTL_SECONDS:-604800}
+    volumes:
+      - manager-upload:/uploadfile
+  manager-web:
+    profiles: [manager]
+    build:
+      context: ../..
+      dockerfile: deploy/companion/Dockerfile.manager
+      target: manager-web
+    image: local/xiaozhi-companion-web:source
+    depends_on: [manager-api]
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MANAGER_PORT:-18002}:80"
+volumes:
+  manager-db:
+  manager-upload:

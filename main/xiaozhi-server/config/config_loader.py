@@ -1,5 +1,7 @@
+from config.log_safety import safe_diagnostic
 import os
 import asyncio
+from copy import deepcopy
 import yaml
 from collections.abc import Mapping
 from config.manage_api_client import (
@@ -81,6 +83,11 @@ async def get_config_from_api_async(config):
     # 如果服务器没有prompt_template，则从本地配置读取
     if not config_data.get("prompt_template"):
         config_data["prompt_template"] = config.get("prompt_template")
+    # Operator-owned, explicitly scoped quality rollout; also works with manager-api.
+    # An absent local key leaves the server configuration unchanged.
+    for local_key in ("dialogue_quality", "companion_affect", "companion_memory", "companion_dialogue", "companion_speech", "companion_initiative"):
+        if local_key in config:
+            config_data[local_key] = deepcopy(config[local_key])
     return config_data
 
 
@@ -144,7 +151,7 @@ def ensure_directories(config):
         try:
             os.makedirs(dir_path, exist_ok=True)
         except PermissionError:
-            print(f"警告：无法创建目录 {dir_path}，请检查写入权限")
+            safe_diagnostic()
 
 
 def merge_configs(default_config, custom_config):

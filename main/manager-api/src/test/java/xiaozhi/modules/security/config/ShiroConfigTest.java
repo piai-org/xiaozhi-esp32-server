@@ -17,6 +17,7 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.context.annotation.Role;
 
 import xiaozhi.modules.security.oauth2.Oauth2Realm;
+import xiaozhi.modules.app.auth.session.AppSessionService;
 import xiaozhi.modules.sys.service.SysParamsService;
 
 class ShiroConfigTest {
@@ -25,7 +26,7 @@ class ShiroConfigTest {
     void beanPostProcessorFactoriesDoNotInstantiateShiroConfigOrBusinessDependenciesEarly() throws Exception {
         Method lifecycleFactory = ShiroConfig.class.getDeclaredMethod("lifecycleBeanPostProcessor");
         Method filterFactory = ShiroConfig.class.getDeclaredMethod(
-                "shirFilter", WebSecurityManager.class, SysParamsService.class);
+                "shirFilter", WebSecurityManager.class, SysParamsService.class, AppSessionService.class);
 
         assertTrue(Modifier.isStatic(lifecycleFactory.getModifiers()));
         assertTrue(BeanPostProcessor.class.isAssignableFrom(ShiroFilterFactoryBean.class));
@@ -36,6 +37,7 @@ class ShiroConfigTest {
         assertNotNull(sysParamsServiceLazy);
         assertTrue(securityManagerLazy.value());
         assertTrue(sysParamsServiceLazy.value());
+        assertTrue(filterFactory.getParameters()[2].getAnnotation(Lazy.class).value());
     }
 
     @Test

@@ -64,3 +64,11 @@ mybatis-plus:
     prefix:
     blobType: BLOB
     boolValue: TRUE
+
+# Disabled by default. Supply secrets only through the server deployment environment.
+app:
+  auth:
+    enabled: ${MINIAPP_AUTH_ENABLED:false}
+    wechat-app-id: ${MINIAPP_WECHAT_APP_ID:}
+    wechat-secret: ${MINIAPP_WECHAT_SECRET:}
+    session-ttl-seconds: ${MINIAPP_SESSION_TTL_SECONDS:604800}

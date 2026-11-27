@@ -1,3 +1,4 @@
+from config.log_safety import safe_diagnostic
 from config.logger import setup_logging
 import json
 from core.providers.llm.base import LLMProviderBase
@@ -51,7 +52,7 @@ class LLMProvider(LLMProviderBase):
             conversation_id=conversation_id,
         ):
             if event.event == ChatEventType.CONVERSATION_MESSAGE_DELTA:
-                print(event.message.content, end="", flush=True)
+                safe_diagnostic()
                 yield event.message.content
 
     def response_with_functions(self, session_id, dialogue, functions=None):

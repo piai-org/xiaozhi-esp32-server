@@ -1,7 +1,6 @@
 // 音频播放模块
-import BlockingQueue from '../../utils/blocking-queue.js?v=0205';
 import { log } from '../../utils/logger.js?v=0205';
-import { createStreamingContext } from './stream-context.js?v=0205';
+import { createStreamingContext } from './stream-context.js?v=20261020-delivery';
 
 // 音频播放器类
 export class AudioPlayer {
@@ -16,7 +15,10 @@ export class AudioPlayer {
         this.audioContext = null;
         this.opusDecoder = null;
         this.streamingContext = null;
-        this.queue = new BlockingQueue();
+        this.generation = 0;
+        this.pendingPackets = 0;
+        this.audioWork = Promise.resolve();
+        this.startPromise = null;
         this.isPlaying = false;
     }
 
@@ -147,89 +149,29 @@ export class AudioPlayer {
         }
     }
 
-    // 启动音频缓冲
-    async startAudioBuffering() {
-        log("开始音频缓冲...", 'info');
-
-        this.initOpusDecoder().catch(error => {
-            log(`预初始化Opus解码器失败: ${error.message}`, 'warning');
-        });
-
-        const timeout = 400;
-        while (true) {
-            const packets = await this.queue.dequeue(
-                6,
-                timeout,
-                (count) => {
-                    log(`缓冲超时，当前缓冲包数: ${count}，开始播放`, 'info');
-                }
-            );
-            if (packets.length) {
-                log(`已缓冲 ${packets.length} 个音频包，开始播放`, 'info');
-                this.streamingContext.pushAudioBuffer(packets);
-            }
-
-            while (true) {
-                const data = await this.queue.dequeue(99, 30);
-                if (data.length) {
-                    this.streamingContext.pushAudioBuffer(data);
-                } else {
-                    break;
-                }
-            }
-        }
-    }
-
-    // 播放已缓冲的音频
-    async playBufferedAudio() {
-        try {
-            this.audioContext = this.getAudioContext();
-
-            if (!this.opusDecoder) {
-                log('初始化Opus解码器...', 'info');
-                try {
-                    this.opusDecoder = await this.initOpusDecoder();
-                    if (!this.opusDecoder) {
-                        throw new Error('解码器初始化失败');
-                    }
-                    log('Opus解码器初始化成功', 'success');
-                } catch (error) {
-                    log('Opus解码器初始化失败: ' + error.message, 'error');
-                    this.isPlaying = false;
-                    return;
-                }
-            }
-
-            if (!this.streamingContext) {
-                this.streamingContext = createStreamingContext(
-                    this.opusDecoder,
-                    this.audioContext,
-                    this.SAMPLE_RATE,
-                    this.CHANNELS,
-                    this.MIN_AUDIO_DURATION
-                );
-            }
-
-            this.streamingContext.decodeOpusFrames();
-            this.streamingContext.startPlaying();
-
-        } catch (error) {
-            log(`播放已缓冲的音频出错: ${error.message}`, 'error');
-            this.isPlaying = false;
-            this.streamingContext = null;
-        }
-    }
-
-    // 添加音频数据到队列
+    // Serialize initialization and decoding so cancellation cannot resurrect packets.
     enqueueAudioData(opusData) {
-        if (opusData.length > 0) {
-            this.queue.enqueue(opusData);
-        } else {
-            log('收到空音频数据帧，可能是结束标志', 'warning');
-            if (this.isPlaying && this.streamingContext) {
-                this.streamingContext.endOfStream = true;
+        if (!opusData.length) return;
+        const generation = this.generation;
+        this.pendingPackets++;
+        this.audioWork = this.audioWork.then(async () => {
+            try {
+                if (generation !== this.generation) return;
+                await this.start();
+                if (generation !== this.generation) return;
+                this.streamingContext.pushAudioBuffer([opusData]);
+            } finally {
+                if (generation === this.generation) this.pendingPackets--;
             }
-        }
+        }).catch(error => log(`音频处理失败: ${error.message}`, 'error'));
+    }
+
+    async finishAudio() {
+        const generation = this.generation;
+        // Capture all packets preceding the stop control message.
+        await this.audioWork;
+        if (generation !== this.generation) return false;
+        return this.streamingContext ? this.streamingContext.finish() : true;
     }
 
     // 预加载解码器
@@ -245,22 +187,37 @@ export class AudioPlayer {
 
     // 启动播放系统
     async start() {
-        await this.preload();
-        this.playBufferedAudio();
-        this.startAudioBuffering();
+        if (!this.startPromise) {
+            this.startPromise = (async () => {
+                const context = this.getAudioContext();
+                await this.initOpusDecoder();
+                this.streamingContext = createStreamingContext(
+                    this.opusDecoder, context, this.SAMPLE_RATE,
+                    this.CHANNELS, this.MIN_AUDIO_DURATION);
+            })().catch(error => {
+                this.startPromise = null;
+                throw error;
+            });
+        }
+        await this.startPromise;
+        // Autoplay policies may leave resume pending until a user gesture.
+        // Initializing the page and decoding incoming packets must still finish.
+        if (this.audioContext.state === 'suspended') {
+            this.audioContext.resume().catch(error => log(`等待音频播放授权: ${error.message}`, 'warning'));
+        }
     }
 
     // 获取音频包统计信息
     getAudioStats() {
         if (!this.streamingContext) {
             return {
-                pendingDecode: 0,
+                pendingDecode: this.pendingPackets,
                 pendingPlay: 0,
-                totalPending: 0
+                totalPending: this.pendingPackets
             };
         }
 
-        const pendingDecode = this.streamingContext.getPendingDecodeCount();
+        const pendingDecode = this.pendingPackets + this.streamingContext.getPendingDecodeCount();
         const pendingPlay = this.streamingContext.getPendingPlayCount();
 
         return {
@@ -275,7 +232,8 @@ export class AudioPlayer {
         log('AudioPlayer: 清空所有音频', 'info');
 
         // 清空接收队列（使用clear方法保持对象引用）
-        this.queue.clear();
+        this.generation++;
+        this.pendingPackets = 0;
 
         // 清空流上下文的所有缓冲
         if (this.streamingContext) {

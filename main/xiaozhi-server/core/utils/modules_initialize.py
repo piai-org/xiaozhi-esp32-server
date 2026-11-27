@@ -69,12 +69,19 @@ def initialize_modules(
             if "type" not in config["Memory"][select_memory_module]
             else config["Memory"][select_memory_module]["type"]
         )
-        modules["memory"] = memory.create_instance(
-            memory_type,
-            config["Memory"][select_memory_module],
-            config.get("summaryMemory", None),
-        )
-        logger.bind(tag=TAG).info(f"初始化组件: memory成功 {select_memory_module}")
+        try:
+            modules["memory"] = memory.create_instance(
+                memory_type,
+                config["Memory"][select_memory_module],
+                config.get("summaryMemory", None),
+            )
+            logger.bind(tag=TAG).info(f"初始化组件: memory成功 {select_memory_module}")
+        except Exception as exc:
+            if config["Memory"][select_memory_module].get('mode') != 'verified_memory':
+                raise
+            modules["memory"] = memory.create_instance('nomem', {'type':'nomem'})
+            modules["memory"].memory_unavailable = True
+            logger.bind(tag=TAG).warning(f"长期记忆初始化不可用，继续无记忆通话: {type(exc).__name__}")
 
     # 初始化VAD模块
     if init_vad:

@@ -1,4 +1,6 @@
 import httpx
+import json
+from urllib.parse import urlsplit
 from config.logger import setup_logging
 from plugins_func.register import (
     register_function,
@@ -193,3 +195,85 @@ async def web_search(conn: "ConnectionHandler", query: str = None):
         result_text = "联网搜索出现异常，请稍后重试。"
 
     return ActionResponse(Action.REQLLM, result_text, None)
+
+
+async def search_evidence(conn, query):
+    """Structured read-only search. Preserve provider-returned URLs, never invent them.
+
+    Reuses existing search provider settings; DashScope is available with the
+    explicitly configured independent intent model when no search key is bound.
+    """
+    settings = (conn.config.get("plugins") or {}).get("web_search") or {}
+    if isinstance(settings,str):
+        try:settings=json.loads(settings)
+        except ValueError:settings={}
+    if not isinstance(settings,dict):settings={}
+    provider = settings.get("provider", "dashscope").lower()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(12, connect=3), trust_env=False) as client:
+        if provider == "dashscope":
+            llm = conn.intent.llm
+            base = urlsplit(llm.base_url)
+            if not base.hostname or not base.hostname.endswith(".aliyuncs.com"):
+                raise ValueError("Unsupported search endpoint")
+            url = base.scheme + "://" + base.netloc + "/api/v1/services/aigc/multimodal-generation/generation"
+            payload = {"model": llm.model_name,
+                       "input": {"messages": [{"role": "user", "content": [{"text": query}]}]},
+                       "parameters": {"enable_thinking": False, "enable_search": True,
+                                      "search_options": {"forced_search": True, "enable_source": True,
+                                                         "prepend_search_result": True},
+                                      "max_tokens": 128, "incremental_output": True}}
+            sources = []
+            async with client.stream("POST", url, json=payload, headers={
+                "Authorization": "Bearer " + llm.api_key, "X-DashScope-SSE": "enable"}) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    event = json.loads(line[5:])
+                    if event.get("code"):
+                        raise ValueError("Search provider error")
+                    sources.extend(event.get("output", {}).get("search_info", {}).get("search_results", []) or [])
+                    if sources:
+                        # Sources are prepended; an unused generated answer adds latency.
+                        break
+            rows = [{"title": s.get("title", ""), "url": s.get("url", ""),
+                     "publisher": s.get("site_name", ""), "content": "", "published_at": None}
+                    for s in sources]
+        else:
+            key = settings.get("api_key")
+            if not key:
+                raise ValueError("Search credentials unavailable")
+            if provider == "metaso":
+                response = await client.post("https://metaso.cn/api/v1/search",
+                    headers={"Authorization": "Bearer " + key},
+                    json={"q": query, "size": 5, "scope": "webpage", "includeSummary": True})
+                response.raise_for_status()
+                rows = [{"title": s.get("title", ""), "url": s.get("link") or s.get("url", ""),
+                         "content": s.get("summary", ""), "publisher": s.get("siteName", ""),
+                         "published_at": s.get("date")}
+                        for s in response.json().get("webpages", [])]
+            elif provider == "tavily":
+                response = await client.post("https://api.tavily.com/search",
+                    headers={"Authorization": "Bearer " + key},
+                    json={"query": query, "max_results": 5, "search_depth": "basic",
+                          "include_answer": False, "include_published_date": True})
+                response.raise_for_status()
+                rows = [{"title": s.get("title", ""), "url": s.get("url", ""),
+                         "content": s.get("content", ""), "publisher": "",
+                         "published_at": s.get("published_date")}
+                        for s in response.json().get("results", [])]
+            elif provider == "serply":
+                response = await client.get("https://api.serply.io/v1/search",
+                    headers={"X-Api-Key": key}, params={"q": query, "num": 5})
+                response.raise_for_status()
+                rows = [{"title": s.get("title", ""), "url": s.get("url") or s.get("link", ""),
+                         "content": s.get("description", ""), "publisher": "", "published_at": None}
+                        for s in response.json().get("results", [])]
+            else:
+                raise ValueError("Unknown search provider")
+    unique = {}
+    for row in rows:
+        parsed = urlsplit(row["url"])
+        if parsed.scheme in ("http", "https") and parsed.hostname:
+            unique.setdefault(row["url"], row)
+    return list(unique.values())[:8]

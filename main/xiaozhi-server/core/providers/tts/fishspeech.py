@@ -1,3 +1,4 @@
+from config.log_safety import safe_diagnostic
 import base64
 import requests
 import ormsgpack
@@ -183,6 +184,6 @@ class TTSProvider(TTSProviderBase):
 
         else:
             error_msg = f"Request failed with status code {response.status_code}"
-            print(error_msg)
-            print(response.json())
+            safe_diagnostic()
+            safe_diagnostic()
             raise Exception(error_msg)

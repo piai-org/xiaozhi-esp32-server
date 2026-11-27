@@ -29,7 +29,7 @@ from core.utils.modules_initialize import (
 )
 from core.handle.reportHandle import report, enqueue_tool_report
 from core.providers.tts.default import DefaultTTS
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from core.utils.dialogue import Message, Dialogue
 from core.providers.asr.dto.dto import InterfaceType
 from core.handle.textHandle import handleTextMessage
@@ -95,6 +95,8 @@ class ConnectionHandler:
 
         self.need_bind = False  # 是否需要绑定设备
         self.bind_completed_event = asyncio.Event()
+        self.components_ready_event = asyncio.Event()
+        self.initialization_error = None
         self.bind_code = None  # 绑定设备的验证码
         self.last_bind_prompt_time = 0  # 上次播放绑定提示的时间戳(秒)
         self.bind_prompt_interval = 60  # 绑定提示播放间隔(秒)
@@ -346,6 +348,18 @@ class ConnectionHandler:
             asyncio.create_task(check_bind_device(self))
 
     async def _route_message(self, message):
+        # A resolved binding/config request is not proof that the per-connection
+        # intent LLM, prompt and audio channels have finished initialization.
+        try:
+            await asyncio.wait_for(self.components_ready_event.wait(), timeout=20)
+        except asyncio.TimeoutError:
+            self.logger.bind(tag=TAG).warning("连接组件尚未就绪，关闭连接等待重试")
+            await self.websocket.close(code=1013, reason="服务初始化中，请稍后重连")
+            return
+        if self.initialization_error is not None:
+            await self.websocket.close(code=1011, reason="服务初始化失败，请稍后重连")
+            return
+
         """消息路由"""
         # 检查是否已经获取到真实的绑定状态
         if not self.bind_completed_event.is_set():
@@ -610,7 +624,7 @@ class ConnectionHandler:
             # 打开语音合成通道
             asyncio.run_coroutine_threadsafe(
                 self.tts.open_audio_channels(self), self.loop
-            )
+            ).result(timeout=10)
             if self.need_bind:
                 self.bind_completed_event.set()
                 return
@@ -640,7 +654,7 @@ class ConnectionHandler:
             # 打开语音识别通道
             asyncio.run_coroutine_threadsafe(
                 self.asr.open_audio_channels(self), self.loop
-            )
+            ).result(timeout=10)
 
             """加载记忆"""
             self._initialize_memory()
@@ -654,16 +668,19 @@ class ConnectionHandler:
             self._inject_tool_call_fewshot()
 
         except Exception as e:
-            self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
+            self.logger.bind(tag=TAG).error(f"实例化组件失败: {type(e).__name__}")
+            raise
 
     def _init_prompt_enhancement(self):
-
+        # SSH/proxy egress is not the user's location. Read-only lookup resolves
+        # weather only from an explicit city, including the background context.
+        context_ip = None if getattr(self.intent, "read_only", False) else self.client_ip
         # 更新上下文信息
-        self.prompt_manager.update_context_info(self, self.client_ip)
+        self.prompt_manager.update_context_info(self, context_ip)
         enhanced_prompt = self.prompt_manager.build_enhanced_prompt(
             self.config["prompt"],
             self.device_id,
-            self.client_ip,
+            context_ip,
             emoji_enabled=(self.features or {}).get("emoji", True),
         )
         if enhanced_prompt:
@@ -793,9 +810,15 @@ class ConnectionHandler:
             # 异步获取差异化配置
             await self._initialize_private_config_async()
             # 在线程池中初始化组件
-            self.executor.submit(self._initialize_components)
+            await self.loop.run_in_executor(self.executor, self._initialize_components)
+            from core.utils.companion_initiative import ensure_runtime
+            await ensure_runtime(self)
         except Exception as e:
-            self.logger.bind(tag=TAG).error(f"后台初始化失败: {e}")
+            self.initialization_error = type(e).__name__
+            self.logger.bind(tag=TAG).error(f"后台初始化失败: {self.initialization_error}")
+        finally:
+            # Set on the event loop, after the worker and channel setup finish.
+            self.components_ready_event.set()
 
     async def _initialize_private_config_async(self):
         """从接口异步获取差异化配置（异步版本，不阻塞主循环）"""
@@ -1040,6 +1063,11 @@ class ConnectionHandler:
                 self.intent.set_llm(self.llm)
                 self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
 
+        # Read-only workflow dispatches only its three bounded information reads;
+        # do not initialize MCP/IoT/action executors or inherited music bindings.
+        if getattr(self.intent, "read_only", False):
+            return
+
         """加载统一工具处理器"""
         self.func_handler = UnifiedToolHandler(self)
 
@@ -1052,19 +1080,31 @@ class ConnectionHandler:
         # 更新系统prompt至上下文
         self.dialogue.update_system_message(self.prompt)
 
-    def chat(self, query, depth=0):
+    def chat(self, query, depth=0, lookup_context=None):
+        if lookup_context and lookup_context["generation"] != getattr(self, "lookup_generation", None):
+            return None
         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
         current_sentence_id = None
 
         if query is not None:
             self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
 
+        enqueue_tts = self.tts.tts_text_queue.put
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
             current_sentence_id = str(uuid.uuid4().hex)
             self.sentence_id = current_sentence_id  # 更新共享属性
-            self.dialogue.put(Message(role="user", content=query))
-            self.tts.tts_text_queue.put(
+            if (self.config.get('companion_speech') or {}).get('enabled') is True:
+                try:
+                    from core.utils.companion_speech import SpeechQueue
+                    enqueue_tts = SpeechQueue(self, query, lookup_context, current_sentence_id).put
+                except Exception as exc:
+                    self.logger.bind(tag=TAG).warning('朗读方向未启用，沿用原合成: '+type(exc).__name__)
+            self.dialogue.put(Message(
+                role="user", content=query,
+                is_runtime_event=bool((lookup_context or {}).get("runtime_event")),
+            ))
+            enqueue_tts(
                 TTSMessageDTO(
                     sentence_id=current_sentence_id,
                     sentence_type=SentenceType.FIRST,
@@ -1107,16 +1147,59 @@ class ConnectionHandler:
                 functions.append(DIRECT_ANSWER_TOOL)
 
         response_message = []
+        reply_policy = None
 
         try:
             # 使用带记忆的对话
+            from core.utils.information_response import natural_response_enabled, natural_reply_responses
+            from core.utils.companion_response import select_reply_policy, finalize_role_reply, reply_is_current
+            if depth == 0:
+                reply_policy = select_reply_policy(self, lookup_context or {})
+                if reply_policy is not None and lookup_context is None:
+                    lookup_context = {'generation': getattr(self, 'lookup_generation', None)}
             memory_str = None
+            layered_memory = bool(getattr(self.memory, 'layered_context', False))
+            core_memory = None
+            if layered_memory:
+                try:
+                    core_memory = self.memory.core_context()
+                except Exception as exc:
+                    core_memory = {'status': 'unavailable', 'facts': []}
+                    self.logger.bind(tag=TAG).warning(f'核心记忆读取不可用: {type(exc).__name__}')
             # 仅当query非空（代表用户询问）时查询记忆
-            if self.memory is not None and query:
+            skip_memory = (lookup_context or {}).get('route') in ('grounded','memory','memory_query','lookup','clarify','cancel','unsupported')
+            if (natural_response_enabled(self) or reply_policy is not None) and not (lookup_context or {}).get('related_context_needed',False):
+                # Broad semantic matches pulled music preferences into a new
+                # painting topic. Core identity stays independent; explicit
+                # personal questions use canonical reads, and continuity cues
+                # can still trigger optional historical retrieval.
+                skip_memory = True
+            if self.memory is not None and query and not skip_memory:
                 future = asyncio.run_coroutine_threadsafe(
                     self.memory.query_memory(query), self.loop
                 )
-                memory_str = future.result()
+                try:
+                    memory_str = future.result(timeout=.7)
+                except FutureTimeoutError:
+                    future.cancel()
+                    memory_str = ''
+                    self.logger.bind(tag=TAG).warning('记忆检索超过时限，本轮按当前会话继续')
+                except Exception as exc:
+                    memory_str = ''
+                    self.logger.bind(tag=TAG).warning(f'记忆检索不可用: {type(exc).__name__}')
+
+            if layered_memory and core_memory['status'] != 'unavailable':
+                # Optional retrieval can overlap a correction/delete. Refresh
+                # only the local core; its independent slot survives timeout.
+                try:
+                    core_memory = self.memory.core_context()
+                except Exception as exc:
+                    core_memory = {'status': 'unavailable', 'facts': []}
+                    self.logger.bind(tag=TAG).warning(f'核心记忆刷新不可用: {type(exc).__name__}')
+            if layered_memory:
+                self.logger.bind(tag=TAG).info('核心记忆上下文: ' + json.dumps({
+                    'status': core_memory['status'], 'count': len(core_memory['facts']),
+                    'related_returned': bool(memory_str)}, ensure_ascii=False))
 
             # 仅在该说话人首次出现时把身份注入 system，之后靠对话历史首轮保留，
             # 避免每轮在 system 重复出现名字诱导模型反复称呼
@@ -1126,22 +1209,168 @@ class ConnectionHandler:
                 self.system_introduced_speakers.add(cs)
                 speaker_for_system = cs
 
-            if self.intent_type == "function_call" and functions is not None:
+            from core.utils.runtime_capabilities import build_runtime_capabilities
+
+            runtime_capabilities = build_runtime_capabilities(
+                self.config, functions, memory_str, self.intent_type,
+                input_origin=(lookup_context or {}).get("input_origin", "unknown"),
+                read_only=bool(getattr(getattr(self, "intent", None), "read_only", False)),
+            )
+            if core_memory is not None:
+                runtime_capabilities.update(core_memory_status=core_memory['status'],
+                    memory_returned_this_request=bool(memory_str or core_memory['facts']))
+            if getattr(self.memory, 'memory_unavailable', False):
+                runtime_capabilities.update(memory_provider='unavailable', cross_session_recall='unavailable',
+                                            memory_write_this_turn='unavailable；没有保存能力，不可承诺已记住')
+            if getattr(self.memory, 'managed', False):
+                runtime_capabilities['memory_write_this_turn'] = (
+                    'queued_or_processing；没有完成回执时不能承诺已保存'
+                    if (lookup_context or {}).get('memory_job') else 'no_write_receipt')
+            if lookup_context and lookup_context.get("evidence"):
+                runtime_capabilities["information_lookup"] = {
+                    "status": "实际读取结果见本轮资料；失败不代表查到",
+                    "available_topics": ["news", "weather", "general"],
+                    "side_effect_tools": "unavailable",
+                }
+            llm_dialogue = self.dialogue.get_llm_dialogue_with_memory(
+                memory_str, self.config.get("voiceprint", {}), speaker_for_system,
+                runtime_capabilities=runtime_capabilities,
+                repair_rejected_naming=True,
+                information_context=(lookup_context or {}).get("evidence"),
+                core_memory=core_memory,
+            )
+
+            grounded_response = (
+                self.dialogue.get_naming_grounded_response()
+                if depth == 0 and (self.intent_type == "nointent" or lookup_context) else None
+            )
+            if depth == 0 and reply_policy is not None and reply_policy.strategy == 'role_direct':
+                llm_responses = natural_reply_responses(
+                    self, lookup_context, memory_str, speaker_for_system, query=query,
+                    runtime_capabilities=runtime_capabilities, reply_policy=reply_policy,
+                    sentence_id=current_sentence_id)
+            elif depth == 0 and (natural_response_enabled(self) or reply_policy is not None):
+                llm_responses = natural_reply_responses(
+                    self, lookup_context, memory_str, speaker_for_system, query=query,
+                    runtime_capabilities=runtime_capabilities, reply_policy=reply_policy,
+                    sentence_id=current_sentence_id)
+            elif lookup_context and lookup_context.get('memory_query'):
+                def personal_fact_responses():
+                    # Resolve lazily at delivery, not when the intent model
+                    # started: a correction/delete may have completed meanwhile.
+                    if self.client_abort or lookup_context['generation'] != getattr(self, 'lookup_generation', None):
+                        return
+                    try:
+                        if not getattr(self.memory, 'managed', False):
+                            raise PermissionError('Personal memory unavailable')
+                        if lookup_context['memory_query'] == 'facts':
+                            read = self.memory.read_facts if getattr(self.memory, 'character_interests', False) else self.memory.answer_facts
+                            answer = read(lookup_context.get('memory_selection', []),
+                                          lookup_context.get('memory_read_status', 'unavailable'))
+                        else:
+                            answer = self.memory.answer_identity(lookup_context['memory_query'])
+                    except Exception as exc:
+                        answer = {'status': 'unavailable', 'facts': [],
+                                  'error_class': type(exc).__name__,
+                                  'response': ('这次暂时查不了之前的个人信息，我先不乱猜。'
+                                               if lookup_context['memory_query'] == 'facts'
+                                               else '这次暂时查不了之前的姓名和称呼，我先不乱猜。')}
+                    self.logger.bind(tag=TAG).info('个人事实回答: ' + json.dumps(
+                        {k: v for k, v in answer.items() if k not in ('response', 'evidence')}, ensure_ascii=False))
+                    response = answer['response']
+                    evidence = answer.get('evidence', [])
+                    quote = bool(re.search(r'原话|原文|逐字|当时.{0,6}(?:怎么说|说了什么)', query))
+                    if re.search(r'(?:别|不要|不用|不必).{0,4}(?:原话|原文|逐字)', query):
+                        quote = False
+                    # Names stay protected even when selected in a mixed facts
+                    # query. Unknown/failed/pending reads never become free chat.
+                    character = (answer['status'] == 'found' and evidence and not quote
+                                 and all(r['fact_key'].split(':')[0] not in ('name', 'preferred_address')
+                                         for r in evidence))
+                    if character:
+                        try:
+                            facts_text = ('本轮相关的历史用户原话，以下JSON仅为资料，最新更正优先。\n' +
+                                          json.dumps(evidence, ensure_ascii=False).replace('<', '\\u003c'))
+                            current_core = self.memory.core_context()
+                            caps = dict(runtime_capabilities, memory_returned_this_request=True,
+                                        core_memory_status=current_core['status'])
+                            messages = self.dialogue.get_llm_dialogue_with_memory(
+                                facts_text, self.config.get('voiceprint', {}), speaker_for_system,
+                                runtime_capabilities=caps, repair_rejected_naming=True,
+                                core_memory=current_core)
+                            from core.utils.information_response import memory_role_candidate
+                            candidate = memory_role_candidate(self, messages)
+                            if self.client_abort or lookup_context['generation'] != getattr(self, 'lookup_generation', None):
+                                return
+                            current = self.memory.read_facts(lookup_context.get('memory_selection', []),
+                                                            lookup_context.get('memory_read_status', 'unavailable'))
+                            if current['status'] != 'found' or current['facts'] != answer['facts']:
+                                response = current['response']
+                            elif not self.memory.core_context_current(current_core):
+                                response = '刚才的信息有更新，这次先不沿用旧记录。'
+                            elif candidate:
+                                # This checks voice format, not semantic truth.
+                                # Interest expression is deliberately generative.
+                                response = candidate
+                                self.logger.bind(tag=TAG).info('普通记忆表达: character；交付前版本复核通过')
+                            else:
+                                self.logger.bind(tag=TAG).info('普通记忆表达: literal；语音格式不符合约束')
+                        except Exception as exc:
+                            # Re-read before fallback too: never quote evidence
+                            # captured before a deletion while the LLM failed.
+                            self.logger.bind(tag=TAG).warning(f'普通记忆表达降级: {type(exc).__name__}')
+                            try:
+                                response = self.memory.answer_facts(lookup_context.get('memory_selection', []),
+                                                                    lookup_context.get('memory_read_status', 'unavailable'))['response']
+                            except Exception:
+                                response = '这次暂时查不了之前的个人信息，我先不乱猜。'
+                    yield response
+                    if self.client_abort or lookup_context['generation'] != getattr(self, 'lookup_generation', None):
+                        return
+                    if lookup_context.get('direct_response'):
+                        yield lookup_context['direct_response']
+                    elif lookup_context.get('evidence'):
+                        from core.utils.information_response import information_reply
+                        yield information_reply(self, llm_dialogue, lookup_context['evidence'])
+                llm_responses = personal_fact_responses()
+            elif lookup_context and lookup_context.get("direct_response"):
+                llm_responses = iter([lookup_context["direct_response"]])
+            elif grounded_response is not None:
+                # Use the same history and TTS pipeline; don't generate a fake
+                # source for user statements that the application can quote.
+                llm_responses = iter([grounded_response])
+            elif lookup_context and lookup_context.get("evidence"):
+                from core.utils.information_response import information_reply
+                llm_responses = iter([information_reply(self, llm_dialogue, lookup_context["evidence"])])
+            elif self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    llm_dialogue,
                     functions=functions,
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    llm_dialogue,
                 )
+                if layered_memory and core_memory['status'] != 'unavailable':
+                    original_responses = llm_responses
+                    def current_core_responses():
+                        try:
+                            first = True
+                            for chunk in original_responses:
+                                if first and chunk:
+                                    first = False
+                                    if not self.memory.core_context_current(core_memory):
+                                        yield '刚才的信息有更新，这次先不沿用旧记录。'
+                                        return
+                                yield chunk
+                        finally:
+                            close = getattr(original_responses, 'close', None)
+                            if close:
+                                close()
+                    llm_responses = current_core_responses()
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
             return None
@@ -1154,7 +1383,10 @@ class ConnectionHandler:
         emotion_flag = True
         try:
             for response in llm_responses:
-                if self.client_abort:
+                if self.client_abort or (lookup_context and lookup_context["generation"] != getattr(self, "lookup_generation", None)):
+                    break
+                if (reply_policy is not None and reply_policy.strategy == 'role_direct'
+                        and not reply_is_current(self, lookup_context, current_sentence_id)):
                     break
                 if self.intent_type == "function_call" and functions is not None:
                     content, tools_call = response
@@ -1187,7 +1419,7 @@ class ConnectionHandler:
                                     new_part = self._clean_response_garbage(new_part)
                                     if new_part:
                                         tc["_da_sent"] = safe_end
-                                        self.tts.tts_text_queue.put(
+                                        enqueue_tts(
                                             TTSMessageDTO(
                                                 sentence_id=current_sentence_id,
                                                 sentence_type=SentenceType.MIDDLE,
@@ -1210,7 +1442,7 @@ class ConnectionHandler:
                 if content is not None and len(content) > 0:
                     if not tool_call_flag:
                         response_message.append(content)
-                        self.tts.tts_text_queue.put(
+                        enqueue_tts(
                             TTSMessageDTO(
                                 sentence_id=current_sentence_id,
                                 sentence_type=SentenceType.MIDDLE,
@@ -1220,7 +1452,7 @@ class ConnectionHandler:
                         )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM stream processing error: {e}")
-            self.tts.tts_text_queue.put(
+            enqueue_tts(
                 TTSMessageDTO(
                     sentence_id=current_sentence_id,
                     sentence_type=SentenceType.MIDDLE,
@@ -1229,7 +1461,7 @@ class ConnectionHandler:
                 )
             )
             if depth == 0:
-                self.tts.tts_text_queue.put(
+                enqueue_tts(
                     TTSMessageDTO(
                         sentence_id=current_sentence_id,
                         sentence_type=SentenceType.LAST,
@@ -1285,7 +1517,7 @@ class ConnectionHandler:
                             if remaining:
                                 remaining = self._clean_response_garbage(remaining)
                                 if remaining:
-                                    self.tts.tts_text_queue.put(
+                                    enqueue_tts(
                                         TTSMessageDTO(
                                             sentence_id=current_sentence_id,
                                             sentence_type=SentenceType.MIDDLE,
@@ -1300,7 +1532,7 @@ class ConnectionHandler:
 
                     if not real_tool_calls:
                         if depth == 0:
-                            self.tts.tts_text_queue.put(
+                            enqueue_tts(
                                 TTSMessageDTO(
                                     sentence_id=current_sentence_id,
                                     sentence_type=SentenceType.LAST,
@@ -1372,13 +1604,40 @@ class ConnectionHandler:
                     self._handle_function_result(tool_results, depth=depth, streamed_text=streamed_text)
 
         # 存储对话内容
+        if lookup_context and lookup_context["generation"] != getattr(self, "lookup_generation", None):
+            return None
         if len(response_message) > 0:
             text_buff = "".join(response_message)
-            self.tts.store_tts_text(current_sentence_id, text_buff)
-            self.dialogue.put(Message(role="assistant", content=text_buff))
+            if reply_policy is not None and reply_policy.strategy == 'role_direct':
+                finalize_role_reply(self, text_buff, current_sentence_id, lookup_context, reply_policy)
+            else:
+                self.tts.store_tts_text(current_sentence_id, text_buff)
+                self.dialogue.put(Message(
+                    role="assistant", content=text_buff,
+                    is_runtime_event=bool((lookup_context or {}).get("runtime_event")),
+                    turn_id=current_sentence_id,
+                    delivery_status=("interrupted" if self.client_abort
+                                     or current_sentence_id != self.sentence_id
+                                     else "generated"),
+                ))
+                # Missing TTS completion remains queued, never a shared promise.
+                recent_ref=(lookup_context or {}).get('recent_turn')
+                if (recent_ref and not self.client_abort
+                        and not (lookup_context or {}).get('runtime_event')):
+                    try:
+                        if self.memory.record_recent_reply(recent_ref,text_buff):
+                            self._recent_reply_delivery=(current_sentence_id,recent_ref)
+                    except Exception as exc:
+                        self.logger.bind(tag=TAG).warning('近期回复保存不可用: '+type(exc).__name__)
+
+            if depth == 0:
+                from core.utils.companion_affect import complete_affect_turn
+                complete_affect_turn(self, text_buff, current_sentence_id, lookup_context)
+                from core.utils.companion_memory import complete_episode_turn
+                complete_episode_turn(self, text_buff, current_sentence_id, lookup_context)
 
         if depth == 0:
-            self.tts.tts_text_queue.put(
+            enqueue_tts(
                 TTSMessageDTO(
                     sentence_id=current_sentence_id,
                     sentence_type=SentenceType.LAST,
@@ -1543,6 +1802,14 @@ class ConnectionHandler:
     async def close(self, ws=None):
         """资源清理方法"""
         try:
+            from core.utils.companion_initiative import close_runtime
+            await close_runtime(self)
+            from core.utils.companion_affect import cancel_affect_turn
+            await asyncio.to_thread(cancel_affect_turn, self)
+            from core.utils.companion_memory import close_episode_turns
+            await asyncio.to_thread(close_episode_turns, self)
+            if hasattr(self, "information_session"):
+                self.information_session.invalidate()
             # 清理 VAD 连接资源
             if (
                     hasattr(self, "vad")

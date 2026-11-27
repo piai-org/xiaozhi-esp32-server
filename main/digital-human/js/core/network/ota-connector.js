@@ -24,6 +24,11 @@ export async function webSocketConnect(otaUrl, config) {
     // 使用OTA返回的websocket URL
     let connUrl = new URL(websocket.url);
 
+    // Docker 服务名仅在服务器内部可解析；浏览器通过 OTA 主机的同号转发端口连接。
+    if (['voice', 'shilao-full-voice-1'].includes(connUrl.hostname)) {
+        connUrl.hostname = new URL(otaUrl, window.location.href).hostname;
+    }
+
     // 添加token参数（从OTA响应中获取）
     if (websocket.token) {
         if (websocket.token.startsWith("Bearer ")) {
@@ -39,7 +44,7 @@ export async function webSocketConnect(otaUrl, config) {
 
     const wsurl = connUrl.toString()
 
-    log(`正在连接: ${wsurl}`, 'info');
+    log(`正在连接: ${connUrl.origin}${connUrl.pathname}`, 'info');
 
     if (wsurl) {
         document.getElementById('serverUrl').value = wsurl;

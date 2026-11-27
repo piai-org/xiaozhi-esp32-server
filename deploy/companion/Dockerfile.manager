@@ -1,0 +1,21 @@
+FROM node:18.20.8-bookworm-slim AS frontend
+WORKDIR /build
+COPY main/manager-web/package.json main/manager-web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY main/manager-web/ ./
+RUN npm run build
+
+FROM maven:3.9.9-eclipse-temurin-21 AS backend
+WORKDIR /build
+COPY main/manager-api/pom.xml ./
+COPY main/manager-api/src/ ./src/
+RUN mvn -B package -DskipTests
+
+FROM nginx:1.28-alpine AS manager-web
+COPY deploy/companion/manager-nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=frontend /build/dist/ /usr/share/nginx/html/
+
+FROM eclipse-temurin:21-jre AS manager-api
+WORKDIR /app
+COPY --from=backend /build/target/xiaozhi-esp32-api.jar /app/app.jar
+ENTRYPOINT ["java", "-jar", "/app/app.jar"]

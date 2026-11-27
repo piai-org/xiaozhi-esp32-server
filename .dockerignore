@@ -5,3 +5,25 @@ __pycache__
 Dockerfile
 tmp/
 data/
+research/
+dsh_analyze/
+20??-??-??_*
+小圆评审*
+**/.env
+**/.env.*
+!**/.env.example
+/main/xiaozhi-server/data/
+**/mysql/data/
+**/tmp/
+**/node_modules/
+**/target/
+**/.test-reports/
+**/__pycache__/
+deploy/companion/runtime/
+
+# Public tracked frontend settings and bundled VAD weights must enter source builds.
+!main/manager-web/.env.production
+!main/xiaozhi-server/models/snakers4_silero-vad/src/silero_vad/data/
+!main/xiaozhi-server/models/snakers4_silero-vad/src/silero_vad/data/**
+
+/.artifacts/

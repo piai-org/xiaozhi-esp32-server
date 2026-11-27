@@ -19,9 +19,12 @@ PRE_BUFFER_COUNT = 5
 
 
 async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text, sentence_id=None):
+    sentence_id = sentence_id if sentence_id is not None else conn.sentence_id
     # 跳过旧句子残留音频
     if sentence_id is not None and sentence_id != conn.sentence_id:
         return
+    from core.utils.companion_initiative import output_allowed
+    if not await output_allowed(conn,sentence_id):return
 
     if conn.tts.tts_audio_first_sentence:
         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
@@ -36,12 +39,14 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
             == conn.sentence_id
         ):
             conn.audio_rate_controller.add_message(
-                lambda: send_tts_message(conn, "sentence_start", text)
+                lambda: send_tts_message(conn, "sentence_start", text, turn_id=sentence_id)
             )
         else:
             # 新句子或流控器未初始化，立即发送
-            await send_tts_message(conn, "sentence_start", text)
+            await send_tts_message(conn, "sentence_start", text, turn_id=sentence_id)
 
+    if sentence_id != conn.sentence_id or conn.client_abort:
+        return
     await sendAudio(conn, audios)
     # 发送句子开始消息
     if sentenceType is not SentenceType.MIDDLE:
@@ -50,9 +55,18 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
     # 发送结束消息（如果是最后一个文本）
     # 通话需要维持speaking状态
     if not conn.calling and sentenceType == SentenceType.LAST:
-        await send_tts_message(conn, "stop", None)
+        await send_tts_message(conn, "stop", None, turn_id=sentence_id)
         if conn.close_after_chat:
             await conn.close()
+    elif conn.calling and sentenceType == SentenceType.LAST and getattr(conn,'_initiative_runtime',None):
+        async def drained():
+            await _wait_for_audio_completion(conn)
+            if sentence_id==conn.sentence_id and not conn.client_abort:
+                from core.utils.companion_initiative import transport_finished
+                await transport_finished(conn,sentence_id)
+        tasks=getattr(conn,'_initiative_drain_tasks',None)
+        if tasks is None:tasks=conn._initiative_drain_tasks=set()
+        task=asyncio.create_task(drained());tasks.add(task);task.add_done_callback(tasks.discard)
 
 
 async def _wait_for_audio_completion(conn: "ConnectionHandler"):
@@ -129,6 +143,8 @@ async def sendAudio(
     """
     if audios is None or len(audios) == 0:
         return
+
+    conn._recent_audio_sentence = conn.sentence_id
 
     send_delay_ms = conn.config.get("tts_audio_send_delay", 0)
     is_single_packet = isinstance(audios, bytes)
@@ -220,7 +236,7 @@ def _start_background_sender(conn: "ConnectionHandler", rate_controller, flow_co
 
     async def send_callback(packet):
         # 检查是否应该中止
-        if conn.client_abort:
+        if conn.client_abort or flow_control["sentence_id"] != conn.sentence_id:
             raise asyncio.CancelledError("客户端已中止")
 
         conn.last_activity_time = time.time() * 1000
@@ -244,7 +260,7 @@ async def _send_audio_with_rate_control(
         send_delay_ms: 自定义发送间隔（毫秒）。
     """
     for packet in audio_list:
-        if conn.client_abort:
+        if conn.client_abort or flow_control["sentence_id"] != conn.sentence_id:
             return
 
         conn.last_activity_time = time.time() * 1000
@@ -264,6 +280,9 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
     """
     执行实际的音频发送
     """
+    from core.utils.companion_initiative import output_allowed
+    if not await output_allowed(conn,flow_control['sentence_id']):
+        raise asyncio.CancelledError('主动台词已取消')
     packet_index = flow_control.get("packet_count", 0)
     sequence = flow_control.get("sequence", 0)
 
@@ -281,11 +300,16 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
     flow_control["sequence"] = sequence + 1
 
 
-async def send_tts_message(conn: "ConnectionHandler", state, text=None):
+async def send_tts_message(conn: "ConnectionHandler", state, text=None, turn_id=None):
     """发送 TTS 状态消息"""
+    if turn_id is not None and turn_id != conn.sentence_id:
+        return
     if text is None and state == "sentence_start":
         return
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
+    # "start" is also sent before generation, when the new turn ID is unknown.
+    if state != "start":
+        message["turn_id"] = getattr(conn, "sentence_id", None)
     if text is not None:
         message["text"] = textUtils.check_emoji(text)
 
@@ -307,6 +331,9 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
         # 检查是否是当前轮次
         if current_sentence_id != conn.sentence_id:
             return
+        if conn.client_abort:
+            return
+        message["reason"] = "completed"
 
         # 停止音频发送循环（仅在流控器已初始化时调用）
         if hasattr(conn, "audio_rate_controller") and conn.audio_rate_controller:
@@ -315,6 +342,24 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))
+    if state == 'stop' and not conn.client_abort:
+        from core.utils.companion_initiative import transport_finished
+        await transport_finished(conn,current_sentence_id)
+        if getattr(conn, '_recent_audio_sentence', None) == current_sentence_id:
+            from core.utils.companion_memory import mark_episode_delivery
+            await asyncio.to_thread(mark_episode_delivery, conn, current_sentence_id, 'audio_sent')
+        dialogue = getattr(conn, "dialogue", None)
+        if dialogue is not None:
+            dialogue.mark_delivery(current_sentence_id, "audio_sent")
+        pending=getattr(conn,'_recent_reply_delivery',None)
+        if (pending and pending[0] == current_sentence_id
+                and getattr(conn,'_recent_audio_sentence',None) == current_sentence_id):
+            try:
+                await asyncio.to_thread(conn.memory.record_recent_reply,pending[1],status='audio_sent')
+                conn._recent_reply_sent = pending
+                if getattr(conn,'_recent_reply_delivery',None)==pending:conn._recent_reply_delivery=None
+            except Exception as exc:
+                conn.logger.bind(tag=TAG).warning('近期语音发送状态保存不可用: '+type(exc).__name__)
 
 
 async def send_stt_message(conn: "ConnectionHandler", text):

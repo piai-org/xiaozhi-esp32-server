@@ -1,0 +1,249 @@
+# Sanitized deployment profile; JSON is valid YAML. Render with prepare.py.
+{
+  "selected_module": {
+    "ASR": "ASR_QwenAudio31Message",
+    "TTS": "TTS_QwenAudio31Flash",
+    "Memory": "Memory_PowerMemTrial20261017",
+    "VAD": "VAD_SileroVAD",
+    "Intent": "Intent_WebReadTrial",
+    "LLM": "LLM_QwenPlusCharacter"
+  },
+  "ASR": {
+    "ASR_QwenAudio31Message": {
+      "type": "aliyunbl_stream",
+      "model": "qwen-audio-3.1-asr-flash-message",
+      "format": "pcm",
+      "ws_url": "${DASHSCOPE_WS_URL}",
+      "api_key": "${DASHSCOPE_API_KEY}",
+      "vad_model": "far_field_meeting_16k",
+      "output_dir": "tmp/",
+      "sample_rate": 16000,
+      "keep_dialect": true,
+      "max_sentence_silence": 800,
+      "disfluency_removal_enabled": false,
+      "intermediate_result_enabled": false
+    }
+  },
+  "TTS": {
+    "TTS_QwenAudio31Flash": {
+      "rate": "1",
+      "type": "alibl_stream",
+      "model": "qwen-audio-3.1-tts-flash",
+      "pitch": "1",
+      "voice": "longanlingxin_v3.1",
+      "format": "pcm",
+      "volume": "50",
+      "ws_url": "${DASHSCOPE_WS_URL}",
+      "api_key": "${DASHSCOPE_API_KEY}",
+      "output_dir": "tmp/",
+      "sample_rate": "24000",
+      "private_voice": "longanlingxin_v3.1",
+      "language": "普通话"
+    }
+  },
+  "Intent": {
+    "Intent_WebReadTrial": {
+      "llm": "LLM_Intent_Qwen37Flash20260715",
+      "mode": "read_only_lookup",
+      "type": "intent_llm",
+      "route_timeout": 7,
+      "lookup_timeout": 24
+    }
+  },
+  "VAD": {
+    "VAD_SileroVAD": {
+      "type": "silero",
+      "model_dir": "models/snakers4_silero-vad",
+      "threshold": 0.5,
+      "min_silence_duration_ms": 700
+    }
+  },
+  "LLM": {
+    "LLM_Intent_Qwen37Flash20260715": {
+      "type": "openai",
+      "top_k": "",
+      "top_p": "",
+      "api_key": "${DASHSCOPE_API_KEY}",
+      "timeout": {
+        "pool": 2,
+        "read": 6,
+        "write": 3,
+        "connect": 3
+      },
+      "base_url": "${DASHSCOPE_BASE_URL}",
+      "max_tokens": 512,
+      "model_name": "qwen3.7-flash-2026-07-15",
+      "temperature": 0.0,
+      "frequency_penalty": ""
+    },
+    "LLM_QwenPlusCharacter": {
+      "type": "openai",
+      "top_k": "",
+      "top_p": "",
+      "api_key": "${DASHSCOPE_API_KEY}",
+      "base_url": "${DASHSCOPE_BASE_URL}",
+      "max_tokens": "1024",
+      "model_name": "qwen-plus-character",
+      "temperature": "0.7",
+      "frequency_penalty": ""
+    }
+  },
+  "Memory": {
+    "Memory_PowerMemTrial20261017": {
+      "mode": "verified_memory",
+      "type": "powermem",
+      "data_dir": "data/companion-memory",
+      "embedder": {
+        "model": "qwen3.7-text-embedding",
+        "api_key": "${DASHSCOPE_API_KEY}",
+        "embedding_dims": 1024,
+        "openai_base_url": "${DASHSCOPE_BASE_URL}"
+      },
+      "extractor": {
+        "model": "qwen3.7-flash-2026-07-15",
+        "api_key": "${DASHSCOPE_API_KEY}",
+        "base_url": "${DASHSCOPE_BASE_URL}"
+      },
+      "subject_scope": "${COMPANION_SUBJECT_SCOPE}",
+      "context_max_chars": 1400,
+      "allowed_device_ids": [
+        "${COMPANION_DEVICE_ID}"
+      ],
+      "context_layers_enabled": true,
+      "recent_context_enabled": true,
+      "related_score_threshold": 0.3,
+      "natural_response_enabled": true,
+      "interest_character_enabled": true
+    }
+  },
+  "dialogue_quality": {
+    "enabled": true,
+    "strategy": "hybrid",
+    "final_model": "character",
+    "character_draft_enabled": true,
+    "allowed_device_ids": [
+      "${COMPANION_DEVICE_ID}"
+    ],
+    "allowed_subject_scopes": [
+      "${COMPANION_SUBJECT_SCOPE}"
+    ],
+    "max_input_chars": 24000,
+    "max_history_messages": 24,
+    "max_output_tokens": 512,
+    "timeout": 15,
+    "temperature": 0.4,
+    "draft_temperature": 0.7,
+    "composer_temperature": 0.4
+  },
+  "companion_affect": {
+    "enabled": true,
+    "companion_id": "xiaoyuan",
+    "mode": "feedback",
+    "allowed_device_ids": [
+      "${COMPANION_DEVICE_ID}"
+    ],
+    "allowed_subject_scopes": [
+      "${COMPANION_SUBJECT_SCOPE}"
+    ],
+    "auxiliary_enabled": true,
+    "timeout": 5,
+    "task_ttl": 30,
+    "queue_capacity": 32,
+    "emotion_half_life_minutes": 90,
+    "mood_half_life_hours": 6,
+    "max_age_hours": 24,
+    "min_intensity": 0.2
+  },
+  "companion_memory": {
+    "enabled": true,
+    "companion_id": "xiaoyuan",
+    "allowed_device_ids": [
+      "${COMPANION_DEVICE_ID}"
+    ],
+    "allowed_subject_scopes": [
+      "${COMPANION_SUBJECT_SCOPE}"
+    ],
+    "timeout": 6,
+    "task_ttl": 60,
+    "queue_capacity": 32,
+    "retention_days": 90,
+    "max_records": 3,
+    "context_max_chars": 4000
+  },
+  "companion_dialogue": {
+    "enabled": true,
+    "profile_version": "xiaoyuan-q4-v3",
+    "companion_id": "xiaoyuan",
+    "allowed_device_ids": [
+      "${COMPANION_DEVICE_ID}"
+    ],
+    "allowed_subject_scopes": [
+      "${COMPANION_SUBJECT_SCOPE}"
+    ],
+    "topics_enabled": true,
+    "topic_ttl_hours": 12,
+    "max_topics": 3
+  },
+  "companion_speech": {
+    "enabled": true,
+    "companion_id": "xiaoyuan",
+    "allowed_device_ids": [
+      "${COMPANION_DEVICE_ID}"
+    ],
+    "allowed_subject_scopes": [
+      "${COMPANION_SUBJECT_SCOPE}"
+    ],
+    "mode": "natural",
+    "slow_rate": 0.85,
+    "fast_rate": 1.15,
+    "ttl_seconds": 60,
+    "planning": "rules"
+  },
+  "companion_initiative": {
+    "enabled": true,
+    "companion_id": "xiaoyuan",
+    "allowed_subject_scopes": [
+      "${COMPANION_SUBJECT_SCOPE}"
+    ],
+    "allowed_device_ids": [
+      "${COMPANION_DEVICE_ID}"
+    ],
+    "min_silence_seconds": 20,
+    "cooldown_seconds": 60,
+    "candidate_ttl_seconds": 60,
+    "max_source_age_seconds": 600,
+    "quiet_ttl_seconds": 3600,
+    "heartbeat_seconds": 2,
+    "presence_ttl_seconds": 8,
+    "playback_guard_seconds": 2,
+    "max_per_session": 2,
+    "topic_cooldown_seconds": 86400,
+    "max_output_chars": 160
+  },
+  "prompt_template": "agent-base-prompt.txt",
+  "delete_audio": true,
+  "close_connection_no_voice_time": 120,
+  "enable_greeting": true,
+  "enable_wakeup_words_response_cache": true,
+  "enable_websocket_ping": true,
+  "plugins": {
+    "web_search": {
+      "provider": "dashscope",
+      "max_results": 3
+    },
+    "get_weather": {}
+  },
+  "server": {
+    "ip": "0.0.0.0",
+    "port": 8000,
+    "http_port": 8003,
+    "websocket": "${PUBLIC_WS_URL}",
+    "vision_explain": "${PUBLIC_HTTP_URL}/mcp/vision/explain",
+    "auth": {
+      "enabled": true,
+      "allowed_devices": [
+        "${COMPANION_DEVICE_ID}"
+      ]
+    }
+  }
+}

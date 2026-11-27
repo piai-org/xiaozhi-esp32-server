@@ -110,6 +110,12 @@ class TTSProviderBase(ABC):
         self.processed_chars = 0
         self.is_first_sentence = True
 
+    def speech_capabilities(self):
+        """Per-turn delivery is opt-in per adapter, not inferred from its API shape."""
+        return dict(provider=self.__class__.__module__.split('.')[-1],
+                    model=getattr(self,'model',None),voice=getattr(self,'voice',None),
+                    instruction=False,rate=False)
+
     def generate_filename(self, extension=".wav"):
         return os.path.join(
             self.output_file,

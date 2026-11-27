@@ -39,6 +39,13 @@ class MemoryProvider(MemoryProviderBase):
 
     def __init__(self, config: Dict[str, Any], summary_memory: Optional[str] = None):
         super().__init__(config)
+        self._managed = None
+        self._memory_scope_denied = False
+        if config.get('mode') == 'verified_memory':
+            from .managed import ManagedMemory
+            self._managed = ManagedMemory(config)
+            self.managed = True
+            return
         self.use_powermem = False
         self.memory_client = None
         self.enable_user_profile = False
@@ -147,6 +154,113 @@ class MemoryProvider(MemoryProviderBase):
             logger.bind(tag=TAG).debug(f"Detailed error: {traceback.format_exc()}")
             self.use_powermem = False
 
+    def init_memory(self, role_id, llm, **kwargs):
+        super().init_memory(role_id, llm, **kwargs)
+        if self._managed:
+            try:
+                self._managed.init_memory(role_id, llm, **kwargs)
+            except PermissionError:
+                # A denied memory scope must not tear down an authenticated
+                # voice connection or fall back to someone else's memories.
+                self._memory_scope_denied = True
+                self.managed = False
+                self.memory_unavailable = True
+                logger.bind(tag=TAG).warning('当前设备未获记忆授权，本次使用无长期记忆通话')
+
+    async def ingest_turn(self, event):
+        if self._memory_scope_denied:
+            return None
+        if self._managed:
+            return await self._managed.ingest_turn(event)
+
+    async def control(self, text, event):
+        if self._memory_scope_denied:
+            return None
+        if self._managed:
+            return await self._managed.control(text, event)
+
+    def answer_identity(self, field):
+        if self._memory_scope_denied or not getattr(self, 'managed', False) or not self._managed:
+            raise PermissionError('Personal memory is unavailable for this device')
+        return self._managed.answer_identity(field)
+
+    @property
+    def layered_context(self):
+        return bool(getattr(self, 'managed', False) and not self._memory_scope_denied
+                    and self._managed and self._managed.layered_context)
+
+    @property
+    def character_interests(self):
+        return self.layered_context and self._managed.character_interests
+
+    def core_context(self):
+        if not self.layered_context:
+            raise PermissionError('Core memory is unavailable for this device')
+        return self._managed.core_context()
+
+    def core_context_current(self, snapshot):
+        return self.layered_context and self._managed.core_context_current(snapshot)
+
+    def read_facts(self, selection, read_status='ok'):
+        if self._memory_scope_denied or not getattr(self, 'managed', False) or not self._managed:
+            raise PermissionError('Personal memory is unavailable for this device')
+        return self._managed.read_facts(selection, read_status)
+
+    def read_identity(self, field):
+        if self._memory_scope_denied or not getattr(self, 'managed', False) or not self._managed:
+            raise PermissionError('Personal memory is unavailable for this device')
+        return self._managed.read_identity(field)
+
+    def delivery_token(self, references=()):
+        if self._memory_scope_denied or not getattr(self, 'managed', False) or not self._managed:
+            raise PermissionError('Personal memory is unavailable for this device')
+        return self._managed.delivery_token(references)
+
+    def facts(self):
+        if self._memory_scope_denied or not getattr(self, 'managed', False) or not self._managed:
+            raise PermissionError('Personal memory is unavailable for this device')
+        return self._managed.facts()
+
+    @property
+    def recent_context_enabled(self):
+        return bool(getattr(self,'managed',False) and not self._memory_scope_denied
+                    and self._managed and self._managed.recent_context_enabled)
+
+    def recent_context(self, session_id):
+        if not self.recent_context_enabled:return {'status':'unavailable','turns':[]}
+        return self._managed.recent_context(session_id)
+
+    def read_companion_episodes(self, companion_id, query, **kwargs):
+        if self._memory_scope_denied or not getattr(self,'managed',False) or not self._managed:
+            raise PermissionError('Episode subject is unavailable')
+        return self._managed.read_companion_episodes(companion_id,query,**kwargs)
+
+    def companion_episode_records(self, companion_id, **kwargs):
+        if self._memory_scope_denied or not getattr(self,'managed',False) or not self._managed:
+            raise PermissionError('Episode subject is unavailable')
+        return self._managed.companion_episode_records(companion_id,**kwargs)
+
+    def maintain_companion_episode(self, companion_id, identifier, revision, **kwargs):
+        if self._memory_scope_denied or not getattr(self,'managed',False) or not self._managed:
+            raise PermissionError('Episode subject is unavailable')
+        return self._managed.maintain_companion_episode(companion_id,identifier,revision,**kwargs)
+
+    def record_recent_user(self, event, session_id):
+        if self.recent_context_enabled:return self._managed.record_recent_user(event,session_id)
+
+    def record_recent_reply(self, reference, text=None, status='queued'):
+        if self.recent_context_enabled:return self._managed.record_recent_reply(reference,text,status)
+
+    def query_catalog(self):
+        if self._memory_scope_denied or not getattr(self, 'managed', False) or not self._managed:
+            raise PermissionError('Personal memory is unavailable for this device')
+        return self._managed.query_catalog()
+
+    def answer_facts(self, selection, read_status='ok'):
+        if self._memory_scope_denied or not getattr(self, 'managed', False) or not self._managed:
+            raise PermissionError('Personal memory is unavailable for this device')
+        return self._managed.answer_facts(selection, read_status)
+
     async def save_memory(self, msgs, session_id=None):
         """
         Save conversation messages to PowerMem.
@@ -159,6 +273,10 @@ class MemoryProvider(MemoryProviderBase):
         Returns:
             Result from PowerMem API or None if failed
         """
+        if self._memory_scope_denied:
+            return None
+        if self._managed:
+            return await self._managed.save_memory(msgs, session_id)
         try:
             if self.use_powermem and self.memory_client is not None and len(msgs) >= 2:
                 # Format the content as a message list for PowerMem
@@ -225,6 +343,10 @@ class MemoryProvider(MemoryProviderBase):
         Returns:
             Formatted string of relevant memories or empty string if none found
         """
+        if self._memory_scope_denied:
+            return ''
+        if self._managed:
+            return await self._managed.query_memory(query)
         if not self.use_powermem or self.memory_client is None:
             logger.bind(tag=TAG).warning("PowerMem is not available, skipping query_memory")
             return ""

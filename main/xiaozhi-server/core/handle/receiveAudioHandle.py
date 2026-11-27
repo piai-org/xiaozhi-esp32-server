@@ -24,6 +24,9 @@ async def handleAudioMessage(conn: "ConnectionHandler", pcm_frame):
         if not hasattr(conn, "vad_resume_task") or conn.vad_resume_task.done():
             conn.vad_resume_task = asyncio.create_task(resume_vad_detection(conn))
         return
+    from core.utils.companion_initiative import voice_activity
+    await voice_activity(conn,have_voice=have_voice,
+                         asr_pending=not have_voice and getattr(conn,'client_voice_stop',False))
     # 服务端AEC功能需要实时触发打断
     if conn.client_aec and have_voice:
         if conn.client_is_speaking and conn.client_listen_mode != "manual":
@@ -40,7 +43,7 @@ async def resume_vad_detection(conn: "ConnectionHandler"):
     conn.just_woken_up = False
 
 
-async def startToChat(conn: "ConnectionHandler", text):
+async def startToChat(conn: "ConnectionHandler", text, origin="asr", input_token=None):
     # 检查输入是否是JSON格式（包含说话人信息）
     speaker_name = None
     actual_text = text
@@ -86,6 +89,31 @@ async def startToChat(conn: "ConnectionHandler", text):
     # manual 模式下不打断正在播放的内容
     if conn.client_is_speaking and conn.client_listen_mode != "manual":
         await handleAbortMessage(conn)
+
+    # The read-only workflow owns a cancellable task, so WebSocket input/abort
+    # remains responsive while the independent router or network read is pending.
+    if getattr(conn.intent, "read_only", False):
+        if conn.client_is_speaking:
+            # A new completed turn (including "不查了") supersedes this workflow.
+            await handleAbortMessage(conn)
+        from datetime import datetime, timezone
+        import uuid
+        event = {'id': uuid.uuid4().hex, 'role': 'user', 'text': actual_text,
+                 'origin': origin, 'observed_at': datetime.now(timezone.utc).isoformat()}
+        if input_token is not None:event['input_token']=input_token
+        from core.utils.companion_initiative import user_input
+        await user_input(conn,event)
+        from core.handle.intentHandler import check_direct_exit
+        from core.utils.util import remove_punctuation_and_length
+        _, exit_text = remove_punctuation_and_length(actual_text)
+        if await check_direct_exit(conn, exit_text):
+            return
+        from core.utils.information_router import ReadOnlySession
+        if not hasattr(conn, "information_session"):
+            conn.information_session = ReadOnlySession(conn)
+        await send_stt_message(conn, actual_text)
+        conn.information_session.submit(actual_text, event)
+        return
 
     # 首先进行意图分析，使用实际文本内容
     intent_handled = await handle_user_intent(conn, actual_text)

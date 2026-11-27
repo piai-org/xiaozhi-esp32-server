@@ -1,9 +1,9 @@
 // UI controller module
 import { loadConfig, saveConfig } from '../config/manager.js?v=0205';
-import { getAudioPlayer } from '../core/audio/player.js?v=0205';
-import { getAudioRecorder } from '../core/audio/recorder.js?v=0205';
-import { requestWakewordBridge, stopWakewordBridgeListener, startWakewordBridgeListener, getWakewordBridgeUrl, onNextBridgeConnected } from '../core/network/wakeword-bridge.js?v=0205';
-import { getWebSocketHandler } from '../core/network/websocket.js?v=0205';
+import { getAudioPlayer } from '../core/audio/player.js?v=20261020-delivery';
+import { getAudioRecorder } from '../core/audio/recorder.js?v=20261020-delivery';
+import { requestWakewordBridge, stopWakewordBridgeListener, startWakewordBridgeListener, getWakewordBridgeUrl, onNextBridgeConnected } from '../core/network/wakeword-bridge.js?v=20261020-delivery';
+import { getWebSocketHandler } from '../core/network/websocket.js?v=20261020-delivery';
 import { log } from '../utils/logger.js?v=0205';
 
 // UI controller class
@@ -751,7 +751,7 @@ class UIController {
 
             if (isConnected) {
                 // Check microphone availability (check again after connection)
-                const { checkMicrophoneAvailability } = await import('../core/audio/recorder.js?v=0205');
+                const { checkMicrophoneAvailability } = await import('../core/audio/recorder.js?v=20261020-delivery');
                 const micAvailable = await checkMicrophoneAvailability();
 
                 if (!micAvailable) {

@@ -29,6 +29,7 @@ class IntentProvider(IntentProviderBase):
         self.cache_manager = cache_manager
         self.CacheType = CacheType
         self.history_count = 4  # 默认使用最近4条对话记录
+        self.read_only = config.get("mode") == "read_only_lookup"
 
     def get_intent_system_prompt(self, functions_list: str) -> str:
         """

@@ -1,3 +1,5 @@
+> 本仓库的老人陪伴开发版本：请先阅读 [源码复现、配置与验证说明](deploy/companion/README.md)，其中包含当前模型、角色、记忆、Q1–Q6、管理端及小程序的部署步骤。
+
 [![Banners](docs/images/banner1.png)](https://github.com/xinnan-tech/xiaozhi-esp32-server)
 
 <h1 align="center">小智后端服务xiaozhi-esp32-server</h1>

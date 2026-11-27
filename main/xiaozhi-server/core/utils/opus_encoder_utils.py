@@ -3,6 +3,8 @@ Opus编码工具类
 将PCM音频数据编码为Opus格式
 """
 
+from config.log_safety import safe_diagnostic
+
 import logging
 import traceback
 import numpy as np
@@ -112,7 +114,7 @@ class OpusEncoderUtils:
             return encoded
         except Exception as e:
             logging.error(f"Opus编码失败: {e}")
-            traceback.print_exc()
+            safe_diagnostic()
             return None
 
     def _convert_bytes_to_shorts(self, bytes_data: bytes) -> np.ndarray:

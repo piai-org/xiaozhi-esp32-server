@@ -1,3 +1,4 @@
+from config.log_safety import safe_diagnostic
 import os
 import uuid
 import json
@@ -550,7 +551,7 @@ class TTSProvider(TTSProviderBase):
                     logger.bind(tag=TAG).error(
                         f"Error in _start_monitor_tts_response: {e}"
                     )
-                    traceback.print_exc()
+                    safe_diagnostic()
                     break
             # 连接异常时关闭WebSocket
             if self.ws:

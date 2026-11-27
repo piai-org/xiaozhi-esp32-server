@@ -1,6 +1,6 @@
 """
-系统提示词管理器模块
-负责管理和更新系统提示词，包括快速初始化和异步增强功能
+系统提示词管理器模块。
+将配置中的角色 prompt 填入公共协议模板，并注入运行时资料；不在代码中定义角色人格。
 """
 
 import os
@@ -249,7 +249,11 @@ class PromptManager:
     def build_enhanced_prompt(
         self, user_prompt: str, device_id: str, client_ip: str = None, *args, **kwargs
     ) -> str:
-        """构建增强的系统提示词"""
+        """将角色文本原样填入模板，并提供时间、语言、表情能力和上下文变量。
+
+        user_prompt（配置中的 prompt）负责身份、风格与对话策略；prompt_template
+        负责公共协议。这里不根据角色名拼接人格，也不把配置中的插件绑定当成工具执行结果。
+        """
         if not self.base_prompt_template:
             return user_prompt
 

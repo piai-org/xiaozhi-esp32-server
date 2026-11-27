@@ -3,6 +3,7 @@
 # 系统会优先读取【data/.config.yaml】文件的配置，如果【.config.yaml】文件里的配置不存在，系统会自动去读取【config.yaml】文件的配置。
 # 这样做，可以最简化配置，保护您的密钥安全。
 # 如果你使用了智控台，那么以下所有配置，都不会生效，请在智控台中修改配置
+# 例外：本地 dialogue_quality / companion_affect / companion_memory 是灰度开关，智控台模式也保留。
 
 # #####################################################################################
 # #############################以下是服务器基本运行配置####################################
@@ -63,6 +64,90 @@ close_connection_no_voice_time: 120
 tts_timeout: 15
 # 工具调用超时时间(秒)
 tool_call_timeout: 30
+# Q1 对话质量灰度：data/.config.yaml 可覆盖此块（包括使用智控台时）。
+# 默认关闭；显式填写设备或记忆subject_scope白名单后才会进入候选路径。
+# strategy: legacy=原整理链路，role_direct=最终作者直接生成；不修改角色卡。
+dialogue_quality:
+  enabled: false
+  strategy: legacy  # legacy / role_direct / hybrid（按本轮意图选择最终发言链路）
+  final_model: character  # character=当前角色LLM；intent=意图模型仅作为最终发言对照
+  character_draft_enabled: true  # 仅legacy路径：false跳过可选草稿，最终Flash及交付检查保留
+  # hybrid专用：按请求覆盖，不修改共享模型对象；意图识别和后台观察仍使用原温度。
+  temperature: 0.4
+  draft_temperature: 0.7
+  composer_temperature: 0.4
+  allowed_device_ids: []
+  allowed_subject_scopes: []
+  max_input_chars: 24000
+  max_history_messages: 24
+  max_output_tokens: 512
+  timeout: 15
+# Q2 情绪状态：独立于Q1生成分工；默认不创建状态、不观察也不注入。
+# companion_id必须为稳定角色标识，不能填三台终端各自的device_id。
+companion_affect:
+  enabled: false
+  companion_id: xiaoyuan
+  mode: feedback  # off / feedback(终稿文本) / interaction(双边事件、慢快状态)
+  allowed_device_ids: []
+  allowed_subject_scopes: []
+  auxiliary_enabled: true  # 复用现有意图模型；仅后台观测，不整理角色台词
+  timeout: 5
+  task_ttl: 30
+  queue_capacity: 32
+  emotion_half_life_minutes: 90
+  mood_half_life_hours: 6
+  max_age_hours: 24
+  min_intensity: 0.2
+# Q3 有来源的相处经历，独立于Q2情绪；默认不整理、不建表、不召回。
+companion_memory:
+  enabled: false
+  companion_id: xiaoyuan
+  allowed_device_ids: []
+  allowed_subject_scopes: []
+  timeout: 6
+  task_ttl: 60
+  queue_capacity: 32
+  retention_days: 90
+  max_records: 3
+  context_max_chars: 4000
+# Q4 测试版小圆表达与短期话题意愿，独立灰度，默认关闭。
+companion_dialogue:
+  enabled: false
+  profile_version: xiaoyuan-q4-v3
+  companion_id: xiaoyuan
+  allowed_device_ids: []
+  allowed_subject_scopes: []
+  topics_enabled: true
+  topic_ttl_hours: 12
+  max_topics: 3
+# Q5 朗读方向，只传实际支持的引擎参数，不改台词；默认关闭。
+companion_speech:
+  enabled: false
+  companion_id: xiaoyuan
+  allowed_device_ids: []
+  allowed_subject_scopes: []
+  mode: natural
+  planning: rules  # rules=既有读法；model=最终Flash同次生成语气计划，须单独听评后启用
+  slow_rate: 0.85
+  fast_rate: 1.15
+  ttl_seconds: 60
+# Q6 仅已连接通话，必须显式授权用户作用域；空列表不启用。
+companion_initiative:
+  enabled: false
+  companion_id: xiaoyuan
+  allowed_subject_scopes: []
+  allowed_device_ids: []
+  min_silence_seconds: 20
+  cooldown_seconds: 180
+  candidate_ttl_seconds: 60
+  max_source_age_seconds: 600
+  quiet_ttl_seconds: 3600
+  heartbeat_seconds: 2
+  presence_ttl_seconds: 8
+  playback_guard_seconds: 2
+  max_per_session: 2
+  topic_cooldown_seconds: 86400
+  max_output_chars: 160
 # 开启唤醒词加速
 enable_wakeup_words_response_cache: true
 # 开场是否回复唤醒词
@@ -137,7 +222,7 @@ plugins:
   # 申请后通过这个链接可以找到自己的apihost：https://console.qweather.com/setting?lang=zh
   get_weather:
     api_host: "mj7p3y7naa.re.qweatherapi.com"
-    api_key: "a861d0d5e7bf4ee1a83d9a9e4f96d4da"
+    api_key: "YOUR_WEATHER_API_KEY"
     default_location: "广州"
   # 获取新闻插件的配置，这里根据需要的新闻类型传入对应的url链接，默认支持社会、科技、财经新闻
   # 更多类型的新闻列表查看 https://www.chinanews.com.cn/rss/
@@ -216,7 +301,7 @@ prompt: |
   - 长篇大论，叽叽歪歪
   - 长时间严肃对话
 
-# 默认系统提示词模板文件
+# 公共协议模板：输入、上下文、能力边界与输出格式；身份、性格与陪聊策略在上方 prompt 中定义
 prompt_template: agent-base-prompt.txt
 
 # 系统错误时的回复

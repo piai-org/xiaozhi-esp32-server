@@ -1,3 +1,4 @@
+from config.log_safety import safe_diagnostic
 from ..base import MemoryProviderBase, logger
 import time
 import json
@@ -86,7 +87,7 @@ def extract_json_data(json_code):
             jsonData = json.loads(json_code)
             return json_code
         except Exception as e:
-            print("Error:", e)
+            safe_diagnostic()
         return ""
     jsonData = json_code[start + 7 : end]
     return jsonData
